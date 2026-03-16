@@ -1,0 +1,9 @@
+node_modules/
+.env
+*.log
+oshi-katsu-app/
+wine-app/
+.claude/
+*.bat
+index.html
+start-expo.bat
