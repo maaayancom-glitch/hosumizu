@@ -23,15 +23,13 @@ body {
   font-family: 'Shippori Mincho', 'Hiragino Mincho Pro', 'Yu Mincho', serif;
   background: var(--bg);
   color: var(--text);
-  height: 100dvh;
-  height: 100vh;
+  height: calc(var(--vh, 1vh) * 100);
   overflow: hidden;
   user-select: none;
 }
 #app {
   max-width: 480px;
-  height: 100dvh;
-  height: 100vh;
+  height: calc(var(--vh, 1vh) * 100);
   margin: 0 auto;
   position: relative;
   overflow: hidden;
@@ -1554,7 +1552,15 @@ function updateFreeCounter() {
   }
 }
 
+// iOS Safari の実際の表示高さを --vh にセット
+function setVh() {
+  document.documentElement.style.setProperty('--vh', `${window.innerHeight * 0.01}px`);
+}
+setVh();
+window.addEventListener('resize', setVh);
+
 document.addEventListener('DOMContentLoaded', () => {
+  setVh();
   document.getElementById('player-name').addEventListener('keydown', e => {
     if (e.key==='Enter') startGame();
   });
