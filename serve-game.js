@@ -162,10 +162,21 @@ const server = http.createServer(async (req, res) => {
         const sysWithPlayer = systemPrompt + `\n\n相手の名前は「${playerName}」。会話の中では「姫」や「姫ちゃん」「お前」など、キャラに合った呼び方をしてください。`;
 
         // messages format: [{role:'user'|'assistant', content:'...'}]
+        // 会話の繰り返し防止: 直前のアシスタント発言を列挙してシステムプロンプトに追加
+        const prevReplies = messages
+          .filter(m => m.role === 'assistant')
+          .slice(-5)
+          .map((m, i) => `${i + 1}. ${m.content}`)
+          .join('\n');
+        const noRepeatInstruction = prevReplies
+          ? `\n\n【直前の返答（絶対に繰り返すな）】\n${prevReplies}\n→ 上記と異なる表現・切り口・話題で返答すること。`
+          : '';
+
         const response = await client.messages.create({
           model: 'claude-haiku-4-5',
           max_tokens: 300,
-          system: sysWithPlayer,
+          temperature: 1,
+          system: sysWithPlayer + noRepeatInstruction,
           messages: messages,
         });
 
