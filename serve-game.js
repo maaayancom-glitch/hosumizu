@@ -1,9 +1,18 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const PORT = process.env.PORT || 19008;
 const ROOT = path.join(__dirname);
+
+// ── 購入済みセッション管理 ──────────────────────────────────────────
+// token → { remaining: number }
+const gameSessions = new Map();
+
+function generateToken() {
+  return crypto.randomBytes(24).toString('hex');
+}
 
 const MIME = {
   '.html': 'text/html',
@@ -139,6 +148,79 @@ const server = http.createServer(async (req, res) => {
   }
 
   const urlPath = req.url.split('?')[0];
+  const urlQuery = new URLSearchParams(req.url.includes('?') ? req.url.split('?')[1] : '');
+
+  // ─── POST /api/create-checkout ────────────────────────────────────
+  if (req.method === 'POST' && urlPath === '/api/create-checkout') {
+    try {
+      const stripeKey = process.env.STRIPE_SECRET_KEY;
+      if (!stripeKey) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Stripe not configured' }));
+        return;
+      }
+      const Stripe = require('stripe');
+      const stripe = Stripe(stripeKey);
+      const baseUrl = process.env.BASE_URL || `http://localhost:${PORT}`;
+      const session = await stripe.checkout.sessions.create({
+        payment_method_types: ['card'],
+        line_items: [{
+          price_data: {
+            currency: 'jpy',
+            product_data: { name: '20会話チケット — 担当ホストを水あげするまで' },
+            unit_amount: 100,
+          },
+          quantity: 1,
+        }],
+        mode: 'payment',
+        success_url: `${baseUrl}/host-club-adv.html?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${baseUrl}/host-club-adv.html`,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ url: session.url }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ─── GET /api/verify-session ──────────────────────────────────────
+  if (req.method === 'GET' && urlPath === '/api/verify-session') {
+    try {
+      const stripeSessionId = urlQuery.get('session_id');
+      if (!stripeSessionId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Missing session_id' }));
+        return;
+      }
+      const Stripe = require('stripe');
+      const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+      const session = await stripe.checkout.sessions.retrieve(stripeSessionId);
+      if (session.payment_status !== 'paid') {
+        res.writeHead(402, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Payment not completed' }));
+        return;
+      }
+      const token = generateToken();
+      gameSessions.set(token, { remaining: 20 });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ token, remaining: 20 }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ─── GET /api/session-info ────────────────────────────────────────
+  if (req.method === 'GET' && urlPath === '/api/session-info') {
+    const token = req.headers['x-session-token'];
+    const session = token ? gameSessions.get(token) : null;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ remaining: session ? session.remaining : 0 }));
+    return;
+  }
 
   // ─── POST /api/chat ───────────────────────────────────────────────
   if (req.method === 'POST' && urlPath === '/api/chat') {
@@ -153,6 +235,18 @@ const server = http.createServer(async (req, res) => {
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'API_KEY_MISSING' }));
           return;
+        }
+
+        // セッショントークンチェック（Anthropic管理者キーは除く）
+        if (!req.headers['x-api-key']) {
+          const sessionToken = req.headers['x-session-token'];
+          const gameSession = sessionToken ? gameSessions.get(sessionToken) : null;
+          if (!gameSession || gameSession.remaining <= 0) {
+            res.writeHead(402, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'PAYMENT_REQUIRED' }));
+            return;
+          }
+          gameSession.remaining--;
         }
 
         const Anthropic = require('@anthropic-ai/sdk');

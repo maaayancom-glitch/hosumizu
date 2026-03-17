@@ -5,6 +5,7 @@
     "start": "node serve-game.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.78.0"
+    "@anthropic-ai/sdk": "^0.78.0",
+    "stripe": "^20.4.1"
   }
 }
