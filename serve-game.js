@@ -240,13 +240,17 @@ const server = http.createServer(async (req, res) => {
         // セッショントークンチェック（Anthropic管理者キーは除く）
         if (!req.headers['x-api-key']) {
           const sessionToken = req.headers['x-session-token'];
-          const gameSession = sessionToken ? gameSessions.get(sessionToken) : null;
-          if (!gameSession || gameSession.remaining <= 0) {
-            res.writeHead(402, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'PAYMENT_REQUIRED' }));
-            return;
+          if (sessionToken) {
+            // 購入済みセッションの場合: 残数をチェックして消費
+            const gameSession = gameSessions.get(sessionToken);
+            if (!gameSession || gameSession.remaining <= 0) {
+              res.writeHead(402, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'PAYMENT_REQUIRED' }));
+              return;
+            }
+            gameSession.remaining--;
           }
-          gameSession.remaining--;
+          // セッショントークンなし = 無料会話（クライアント側で残数管理）
         }
 
         const Anthropic = require('@anthropic-ai/sdk');
