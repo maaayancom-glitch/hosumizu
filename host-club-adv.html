@@ -1228,9 +1228,13 @@ function initChat() {
     document.getElementById('choices-area').style.display = '';
   }, 800);
 
+  state.lastRivalTurn = -1;
   state.rivalTimer = setInterval(() => {
     if (state.waiting) return;
-    if (state.turn > 0 && state.turn % 8 === 0 && state.rival > 30) triggerRivalEvent();
+    if (state.turn > 0 && state.turn % 8 === 0 && state.rival > 30 && state.turn !== state.lastRivalTurn) {
+      state.lastRivalTurn = state.turn;
+      triggerRivalEvent();
+    }
     if (state.rival >= 95) { addSystemNote('⚠️ ライバルの脅威が最大に！'); triggerEnding('bad_rival'); }
     if (state.affection <= 0) triggerEnding('bad_aff');
   }, 3000);
