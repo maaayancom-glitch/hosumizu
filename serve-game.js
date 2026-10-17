@@ -1,17 +1,35 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 
 const PORT = process.env.PORT || 19008;
 const ROOT = path.join(__dirname);
 
-// ── 購入済みセッション管理 ──────────────────────────────────────────
-// token → { remaining: number }
-const gameSessions = new Map();
+// ── デモ回数制限（ポートフォリオ公開用） ──────────────────────────────
+// 1人(IP)あたりの1日の会話数と、サイト全体の1日の上限。日付が変わるとリセット。
+const DEMO_PER_IP = Number(process.env.DEMO_PER_IP) || 20;
+const DEMO_DAILY  = Number(process.env.DEMO_DAILY)  || 300;
+const demoUsage = { day: '', total: 0, byIp: new Map() };
 
-function generateToken() {
-  return crypto.randomBytes(24).toString('hex');
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+function resetIfNewDay() {
+  const d = today();
+  if (demoUsage.day !== d) {
+    demoUsage.day = d;
+    demoUsage.total = 0;
+    demoUsage.byIp.clear();
+  }
+}
+function clientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  return (fwd ? fwd.split(',')[0] : req.socket.remoteAddress || '').trim();
+}
+function demoRemaining(ip) {
+  resetIfNewDay();
+  const used = demoUsage.byIp.get(ip) || 0;
+  return Math.max(0, Math.min(DEMO_PER_IP - used, DEMO_DAILY - demoUsage.total));
 }
 
 const MIME = {
@@ -137,88 +155,16 @@ const STAGE_CONTEXT = [
 //  SERVER
 // =====================================================================
 const server = http.createServer(async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
   const urlPath = req.url.split('?')[0];
-  const urlQuery = new URLSearchParams(req.url.includes('?') ? req.url.split('?')[1] : '');
 
-  // ─── POST /api/create-checkout ────────────────────────────────────
-  if (req.method === 'POST' && urlPath === '/api/create-checkout') {
-    try {
-      const stripeKey = process.env.STRIPE_SECRET_KEY;
-      if (!stripeKey) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Stripe not configured' }));
-        return;
-      }
-      const Stripe = require('stripe');
-      const stripe = Stripe(stripeKey);
-      const baseUrl = process.env.BASE_URL || `http://localhost:${PORT}`;
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ['card'],
-        line_items: [{
-          price_data: {
-            currency: 'jpy',
-            product_data: { name: '20会話チケット — 担当ホストを水あげするまで' },
-            unit_amount: 100,
-          },
-          quantity: 1,
-        }],
-        mode: 'payment',
-        success_url: `${baseUrl}/host-club-adv.html?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${baseUrl}/host-club-adv.html`,
-      });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ url: session.url }));
-    } catch (err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
-    }
-    return;
-  }
-
-  // ─── GET /api/verify-session ──────────────────────────────────────
-  if (req.method === 'GET' && urlPath === '/api/verify-session') {
-    try {
-      const stripeSessionId = urlQuery.get('session_id');
-      if (!stripeSessionId) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Missing session_id' }));
-        return;
-      }
-      const Stripe = require('stripe');
-      const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
-      const session = await stripe.checkout.sessions.retrieve(stripeSessionId);
-      if (session.payment_status !== 'paid') {
-        res.writeHead(402, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Payment not completed' }));
-        return;
-      }
-      const token = generateToken();
-      gameSessions.set(token, { remaining: 20 });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ token, remaining: 20 }));
-    } catch (err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
-    }
-    return;
-  }
-
-  // ─── GET /api/session-info ────────────────────────────────────────
-  if (req.method === 'GET' && urlPath === '/api/session-info') {
-    const token = req.headers['x-session-token'];
-    const session = token ? gameSessions.get(token) : null;
+  // ─── GET /api/demo-status ─────────────────────────────────────────
+  if (req.method === 'GET' && urlPath === '/api/demo-status') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ remaining: session ? session.remaining : 0 }));
+    res.end(JSON.stringify({
+      aiEnabled: !!process.env.ANTHROPIC_API_KEY,
+      remaining: demoRemaining(clientIp(req)),
+      perVisitor: DEMO_PER_IP,
+    }));
     return;
   }
 
@@ -228,30 +174,36 @@ const server = http.createServer(async (req, res) => {
     req.on('data', chunk => body += chunk);
     req.on('end', async () => {
       try {
-        const { hostId, messages, playerName, stage } = JSON.parse(body);
-        const apiKey = req.headers['x-api-key'] || process.env.ANTHROPIC_API_KEY;
+        const { hostId, messages: rawMessages, playerName: rawName, stage } = JSON.parse(body);
+        const apiKey = process.env.ANTHROPIC_API_KEY;
 
         if (!apiKey) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'API_KEY_MISSING' }));
           return;
         }
-
-        // セッショントークンチェック（Anthropic管理者キーは除く）
-        if (!req.headers['x-api-key']) {
-          const sessionToken = req.headers['x-session-token'];
-          if (sessionToken) {
-            // 購入済みセッションの場合: 残数をチェックして消費
-            const gameSession = gameSessions.get(sessionToken);
-            if (!gameSession || gameSession.remaining <= 0) {
-              res.writeHead(402, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'PAYMENT_REQUIRED' }));
-              return;
-            }
-            gameSession.remaining--;
-          }
-          // セッショントークンなし = 無料会話（クライアント側で残数管理）
+        if (!HOST_PROMPTS[hostId] || !Array.isArray(rawMessages) || rawMessages.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'BAD_REQUEST' }));
+          return;
         }
+
+        // デモ回数チェック
+        const ip = clientIp(req);
+        if (demoRemaining(ip) <= 0) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'DEMO_LIMIT', remaining: 0 }));
+          return;
+        }
+        demoUsage.byIp.set(ip, (demoUsage.byIp.get(ip) || 0) + 1);
+        demoUsage.total++;
+
+        // 送られてくる履歴・名前の長さを制限（料金の上振れ防止）
+        const messages = rawMessages.slice(-20).map(m => ({
+          role: m.role === 'assistant' ? 'assistant' : 'user',
+          content: String(m.content || '').slice(0, 500),
+        }));
+        const playerName = String(rawName || 'あなた').slice(0, 8);
 
         const Anthropic = require('@anthropic-ai/sdk');
         const client = new Anthropic.default({ apiKey });
@@ -281,7 +233,7 @@ const server = http.createServer(async (req, res) => {
         const text = response.content.find(b => b.type === 'text')?.text || '…';
 
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ message: text }));
+        res.end(JSON.stringify({ message: text, remaining: demoRemaining(ip) }));
 
       } catch (err) {
         const status = err.status || 500;
