@@ -1461,7 +1461,8 @@ async function sendMessage() {
   showTyping();
   let msg;
   try {
-    // デモ回数を使い切ったらAIを呼ばずに簡易モード
+    // AI未接続（静的ホスティング等）やデモ回数切れならAIを呼ばずに簡易モード
+    if (demoLeft === null) throw new Error('API_KEY_MISSING');
     if (demoLeft === 0) throw new Error('DEMO_LIMIT');
     msg = await fetchAIReply(text);
   } catch(e) {
